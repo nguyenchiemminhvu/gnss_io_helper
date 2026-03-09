@@ -1,0 +1,748 @@
+@startuml gnss_io_helper_class_diagram
+
+' ============================================================
+'  gnss_io_helper – Software Architecture
+'  PlantUML source
+'
+'  Part 1 – Static / Class Diagram
+'  Part 2 – Dynamic / Sequence Diagram
+' ============================================================
+
+' ============================================================
+'  PART 1 – STATIC VIEW: Class Diagram
+' ============================================================
+
+title gnss_io_helper Library – Class Diagram (Static View)
+
+hide empty members
+skinparam classAttributeIconSize 0
+skinparam classFontSize 13
+skinparam classBackgroundColor #FEFEFE
+skinparam classBorderColor #888888
+skinparam arrowColor #444444
+skinparam noteBackgroundColor #FFFDE7
+skinparam noteBorderColor #F9A825
+
+' -------------------------------------------------------
+'  Channel type discriminator
+' -------------------------------------------------------
+
+package "io :: channel types" #EEF5FF {
+
+    enum io_channel_type {
+        uart
+        i2c
+        file
+        udp
+        tcp
+        .. (extensible) ..
+    }
+
+    abstract class "i_io_config\n<<abstract struct>>" as i_io_config {
+        + {abstract} channel_type() : io_channel_type
+    }
+
+    i_io_config ..> io_channel_type
+}
+
+' -------------------------------------------------------
+'  UART types & config
+' -------------------------------------------------------
+
+package "io :: uart" #F3E5F5 {
+
+    enum baud_rate {
+        B_9600
+        B_115200
+        B_230400
+        B_460800
+        B_921600
+        .. (50 bps – 4 Mbps) ..
+        B_4000000
+    }
+
+    enum data_bits {
+        FIVE
+        SIX
+        SEVEN
+        EIGHT
+    }
+
+    enum parity {
+        NONE
+        ODD
+        EVEN
+    }
+
+    enum stop_bits {
+        ONE
+        TWO
+    }
+
+    enum flow_control {
+        NONE
+        HARDWARE
+        SOFTWARE
+    }
+
+    class uart_config << (S,#C9B1E0) struct >> {
+        + device_path : string
+        + baud : baud_rate
+        + data : data_bits
+        + par : parity
+        + stop : stop_bits
+        + flow : flow_control
+        + read_timeout_ms : int
+        + non_blocking : bool
+        + channel_type() : io_channel_type
+        __factory helpers__
+        + {static} gnss_default(dev) : uart_config
+        + {static} gnss_high_speed(dev) : uart_config
+        + {static} gnss_default_nb(dev) : uart_config
+        + {static} custom(dev, baud) : uart_config
+    }
+
+    uart_config --|> i_io_config
+    uart_config ..> baud_rate
+    uart_config ..> data_bits
+    uart_config ..> parity
+    uart_config ..> stop_bits
+    uart_config ..> flow_control
+
+    class uart_port {
+        - fd_ : int
+        - config_ : uart_config
+        - mutex_ : mutex
+        __lifecycle__
+        + open(config) : bool
+        + close() : void
+        + is_open() : bool
+        + get_config() : const i_io_config&
+        + flush() : bool
+        + drain() : bool
+        + reconnect() : bool
+        + reconfigure(config) : bool
+        + get_fd() : int
+        __read__
+        + read_byte(c) : ssize_t
+        + read_chars(buf, len) : ssize_t
+        + read_uchars(buf, len) : ssize_t
+        + read_string(str, max_len) : ssize_t
+        + read_bytes(buf, max_len) : ssize_t
+        + available() : int
+        __write__
+        + write_byte(c) : ssize_t
+        + write_chars(buf, len) : ssize_t
+        + write_uchars(buf, len) : ssize_t
+        + write_string(str) : ssize_t
+        + write_bytes(buf) : ssize_t
+        __private__
+        - apply_termios_config() : void
+        - baud_to_speed(baud) : speed_t
+    }
+
+    note right of uart_port
+        POSIX termios API:
+        • open(O_RDWR | O_NOCTTY [| O_NONBLOCK])
+        • cfmakeraw + cfsetispeed/cfsetospeed
+        • tcsetattr(TCSANOW)
+        • ioctl(FIONREAD) for available()
+        • tcdrain / tcflush for drain / flush
+        Thread-safe via internal mutex_
+    end note
+}
+
+' -------------------------------------------------------
+'  I2C / u-blox DDC config
+' -------------------------------------------------------
+
+package "io :: i2c" #E8F5E9 {
+
+    class i2c_config << (S,#81C784) struct >> {
+        + device_path : string
+        + address : uint8_t  = 0x42
+        + read_timeout_ms : int = 100
+        + channel_type() : io_channel_type
+        __DDC register constants__
+        + I2C_DDC_REG_BYTES_AVAIL_MSB = 0xFD
+        + I2C_DDC_REG_BYTES_AVAIL_LSB = 0xFE
+        + I2C_DDC_REG_DATA_STREAM     = 0xFF
+        + I2C_DDC_REG_DATA_WRITE      = 0x00
+        __factory helpers__
+        + {static} ddc_default(dev, addr) : i2c_config
+        + {static} custom(dev, addr, timeout) : i2c_config
+    }
+
+    i2c_config --|> i_io_config
+
+    class i2c_port {
+        - fd_ : int
+        - config_ : i2c_config
+        - mutex_ : mutex
+        __lifecycle__
+        + open(config) : bool
+        + close() : void
+        + is_open() : bool
+        + get_config() : const i_io_config&
+        + flush() : bool
+        + drain() : bool
+        + reconnect() : bool
+        + reconfigure(config) : bool
+        + get_fd() : int  ← always -1
+        __read__
+        + read_byte(c) : ssize_t
+        + read_chars(buf, len) : ssize_t
+        + read_uchars(buf, len) : ssize_t
+        + read_string(str, max_len) : ssize_t
+        + read_bytes(buf, max_len) : ssize_t
+        + available() : int
+        __write__
+        + write_byte(c) : ssize_t
+        + write_chars(buf, len) : ssize_t
+        + write_uchars(buf, len) : ssize_t
+        + write_string(str) : ssize_t
+        + write_bytes(buf) : ssize_t
+        __private__
+        - open_locked(config) : bool
+        - close_locked() : void
+        - rdwr_locked(...) : ssize_t
+    }
+
+    note right of i2c_port
+        Linux i2c-dev API:
+        • open("/dev/i2c-N", O_RDWR)
+        • ioctl(fd_, I2C_SLAVE, address)
+        • available(): I2C_RDWR write[0xFD] + read[2]
+          → 16-bit big-endian byte count
+        • read_bytes(): I2C_RDWR write[0xFF] + read[N]
+        • write_bytes(): single write [0x00, payload…]
+        get_fd() returns -1 (I2C not pollable)
+    end note
+}
+
+' -------------------------------------------------------
+'  File record/replay config
+' -------------------------------------------------------
+
+package "io :: file" #FFF3E0 {
+
+    class file_config << (S,#FFB74D) struct >> {
+        + file_path : string
+        + loop : bool = false
+        + writable : bool = false
+        + throttle_us : int = 0
+        + channel_type() : io_channel_type
+        __factory helpers__
+        + {static} replay(path, loop, throttle_us) : file_config
+        + {static} record(path) : file_config
+        + {static} custom(path, writable, loop, throttle_us) : file_config
+    }
+
+    file_config --|> i_io_config
+
+    class file_port {
+        - fd_ : int
+        - config_ : file_config
+        - mutex_ : mutex
+        __lifecycle__
+        + open(config) : bool
+        + close() : void
+        + is_open() : bool
+        + get_config() : const i_io_config&
+        + flush() : bool  ← fsync()
+        + drain() : bool  ← fsync()
+        + reconnect() : bool
+        + reconfigure(config) : bool
+        + get_fd() : int
+        __read__
+        + read_byte(c) : ssize_t
+        + read_chars(buf, len) : ssize_t
+        + read_uchars(buf, len) : ssize_t
+        + read_string(str, max_len) : ssize_t
+        + read_bytes(buf, max_len) : ssize_t
+        + available() : int
+        __write__
+        + write_byte(c) : ssize_t
+        + write_chars(buf, len) : ssize_t
+        + write_uchars(buf, len) : ssize_t
+        + write_string(str) : ssize_t
+        + write_bytes(buf) : ssize_t
+        __private__
+        - open_locked(config) : bool
+        - close_locked() : void
+        - read_locked(buf, len) : ssize_t
+    }
+
+    note right of file_port
+        POSIX file API:
+        Replay mode (writable=false):
+        • open(O_RDONLY)
+        • available(): fstat + lseek(SEEK_CUR) → bytes to EOF
+        • read_bytes(): sequential read, optional loop wrap
+        • write_bytes(): throws file_open_error
+
+        Record mode (writable=true):
+        • open(O_RDWR | O_CREAT | O_TRUNC)
+        • write_bytes(): append at current position
+        • get_fd() returns pollable fd (pipe support)
+    end note
+}
+
+' -------------------------------------------------------
+'  Interfaces
+' -------------------------------------------------------
+
+package "io :: interfaces" #E3F2FD {
+
+    interface i_io_reader << interface >> {
+        + {abstract} read_byte(c : char&) : ssize_t
+        + {abstract} read_chars(buf : char*, len : size_t) : ssize_t
+        + {abstract} read_uchars(buf : uchar*, len : size_t) : ssize_t
+        + {abstract} read_string(str : string&, max_len : size_t) : ssize_t
+        + {abstract} read_bytes(buf : vector<uint8_t>&, max_len : size_t) : ssize_t
+        + {abstract} available() : int
+    }
+
+    interface i_io_writer << interface >> {
+        + {abstract} write_byte(c : char) : ssize_t
+        + {abstract} write_chars(buf : const char*, len : size_t) : ssize_t
+        + {abstract} write_uchars(buf : const uchar*, len : size_t) : ssize_t
+        + {abstract} write_string(str : const string&) : ssize_t
+        + {abstract} write_bytes(buf : const vector<uint8_t>&) : ssize_t
+    }
+
+    interface i_io_port << interface >> {
+        + {abstract} open(config : const i_io_config&) : bool
+        + {abstract} close() : void
+        + {abstract} is_open() : bool
+        + {abstract} get_config() : const i_io_config&
+        + {abstract} flush() : bool
+        + {abstract} drain() : bool
+        + {abstract} reconnect() : bool
+        + {abstract} reconfigure(config : const i_io_config&) : bool
+        + {abstract} get_fd() : int
+    }
+
+    i_io_port --|> i_io_reader
+    i_io_port --|> i_io_writer
+}
+
+uart_port  ..|> i_io_port
+i2c_port   ..|> i_io_port
+file_port  ..|> i_io_port
+
+' -------------------------------------------------------
+'  Factory
+' -------------------------------------------------------
+
+package "io :: factory" #ECEFF1 {
+
+    class io_port_factory << (F,#90A4AE) >> {
+        + {static} create(config : const i_io_config&) : shared_ptr<i_io_port>
+    }
+
+    note right of io_port_factory
+        Switches on config.channel_type():
+          uart → make_shared<uart_port>()
+          i2c  → make_shared<i2c_port>()
+          file → make_shared<file_port>()
+          ...  → throw invalid_argument
+        ONLY file that includes concrete
+        sub-folder headers.
+    end note
+
+    io_port_factory ..> i_io_port   : "creates"
+    io_port_factory ..> i_io_config : "reads discriminator"
+}
+
+' -------------------------------------------------------
+'  High-Level Wrapper
+' -------------------------------------------------------
+
+package "io :: wrapper" #E8EAF6 {
+
+    class io_channel_wrapper {
+        - port_ : weak_ptr<i_io_port>
+        __lifecycle__
+        + io_channel_wrapper(port : shared_ptr<i_io_port>)
+        + initialize(config) : bool
+        + shutdown() : void
+        + reconnect() : bool
+        + reconfigure(config) : bool
+        __status__
+        + is_ready() : bool
+        + get_config() : const i_io_config&
+        + get_fd() : int
+        __read (thread-safe delegation)__
+        + read_byte(c) : ssize_t
+        + read_chars(buf, len) : ssize_t
+        + read_uchars(buf, len) : ssize_t
+        + read_string(str, max_len) : ssize_t
+        + read_bytes(buf, max_len) : ssize_t
+        + available() : int
+        __write (thread-safe delegation)__
+        + write_byte(c) : ssize_t
+        + write_chars(buf, len) : ssize_t
+        + write_uchars(buf, len) : ssize_t
+        + write_string(str) : ssize_t
+        + write_bytes(buf) : ssize_t
+        __buffer__
+        + flush() : bool
+        + drain() : bool
+    }
+
+    io_channel_wrapper --> i_io_port : "delegates via\nweak_ptr"
+
+    note right of io_channel_wrapper
+        Dependency Inversion:
+        Holds weak_ptr<i_io_port> so port
+        lifetime is controlled by the owner
+        (shared_ptr in gnss_controller).
+
+        Stateless facade: no mutex here —
+        thread-safety lives in each concrete
+        port implementation (uart_port,
+        i2c_port, file_port).
+
+        Non-copyable. Movable.
+    end note
+}
+
+' -------------------------------------------------------
+'  Exception Hierarchy
+' -------------------------------------------------------
+
+package "io :: exceptions" #FFF8E1 {
+
+    class "std::runtime_error" as rt_err << (E,#FF9800) >>
+
+    class io_exception << (E,#FFCA28) >> {
+        + io_exception(msg)
+    }
+    class io_open_error << (E,#FFCA28) >> {}
+    class io_config_error << (E,#FFCA28) >> {}
+    class io_read_error << (E,#FFCA28) >> {}
+    class io_write_error << (E,#FFCA28) >> {}
+    class io_timeout_error << (E,#FFCA28) >> {}
+
+    class uart_open_error << (E,#CE93D8) >> {}
+    class uart_config_error << (E,#CE93D8) >> {}
+    class uart_read_error << (E,#CE93D8) >> {}
+    class uart_write_error << (E,#CE93D8) >> {}
+
+    class i2c_open_error << (E,#A5D6A7) >> {}
+    class i2c_config_error << (E,#A5D6A7) >> {}
+    class i2c_read_error << (E,#A5D6A7) >> {}
+
+    class file_open_error << (E,#FFCC80) >> {}
+    class file_read_error << (E,#FFCC80) >> {}
+
+    io_exception    --|> rt_err
+    io_open_error   --|> io_exception
+    io_config_error --|> io_exception
+    io_read_error   --|> io_exception
+    io_write_error  --|> io_exception
+    io_timeout_error --|> io_exception
+
+    uart_open_error   --|> io_open_error
+    uart_config_error --|> io_config_error
+    uart_read_error   --|> io_read_error
+    uart_write_error  --|> io_write_error
+
+    i2c_open_error   --|> io_open_error
+    i2c_config_error --|> io_config_error
+    i2c_read_error   --|> io_read_error
+
+    file_open_error --|> io_open_error
+    file_read_error --|> io_read_error
+}
+
+' -------------------------------------------------------
+'  Consumer
+' -------------------------------------------------------
+
+package "location_service :: hw_adapter" #CFD8DC {
+
+    class gnss_controller {
+        - channel_ : shared_ptr<i_io_port>
+        - wrapper_ : unique_ptr<io_channel_wrapper>
+        + start(config : i_io_config) : bool
+        + stop() : void
+        + send_ubx_command(cmd : vector<uint8_t>) : bool
+        + read_ubx_frame(frame : vector<uint8_t>&) : bool
+    }
+
+    gnss_controller --> io_channel_wrapper : "uses"
+    gnss_controller ..> io_port_factory    : "creates port via"
+}
+
+@enduml
+
+' ============================================================
+'  PART 2 – DYNAMIC VIEW: Sequence Diagram
+' ============================================================
+
+@startuml gnss_io_helper_sequence
+
+title gnss_io_helper Library – Sequence Diagram (Dynamic View)
+
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceGroupBackgroundColor #F3F3F3
+skinparam sequenceLifeLineBorderColor #888888
+skinparam participantBackgroundColor #FEFEFE
+skinparam participantBorderColor #888888
+skinparam noteBorderColor #F9A825
+skinparam noteBackgroundColor #FFFDE7
+
+participant "gnss_controller"       as GNSS  #BBDEFB
+participant "io_port_factory"       as FAC   #CFD8DC
+participant "io_channel_wrapper"    as WR    #C8E6C9
+participant "i_io_port\n(concrete)" as PORT  #E1BEE7
+participant "Linux Kernel /\nHW Bus"         as KERN  #CFD8DC
+
+' ============================================================
+== Phase 1 : Factory-based Port Creation ==
+' ============================================================
+
+GNSS -> GNSS  : cfg = uart_config::gnss_default("/dev/ttyS0")
+note right of GNSS
+    config.channel_type() == io_channel_type::uart
+    Other options: i2c_config, file_config
+end note
+
+GNSS -> FAC   : create(cfg)
+activate FAC
+FAC -> FAC    : switch cfg.channel_type()
+note right of FAC
+    uart → make_shared<uart_port>()
+    i2c  → make_shared<i2c_port>()
+    file → make_shared<file_port>()
+end note
+FAC --> GNSS  : shared_ptr<i_io_port>  (port)
+deactivate FAC
+
+GNSS -> WR    : new io_channel_wrapper(port)
+activate WR
+WR -> WR      : port_ = weak_ptr<i_io_port>(port)
+
+' ============================================================
+== Phase 2 : Initialization ==
+' ============================================================
+
+GNSS -> WR    : initialize(cfg)
+activate WR
+WR -> PORT    : open(cfg)
+activate PORT
+
+alt UART transport
+    PORT -> KERN  : ::open("/dev/ttyS0", O_RDWR|O_NOCTTY)
+    activate KERN
+    KERN --> PORT : fd_ = 3
+    deactivate KERN
+    PORT -> PORT  : apply_termios_config()
+    note right of PORT
+        cfmakeraw(&tty)
+        cfsetispeed/cfsetospeed(B9600)
+        CS8, PARENB=0, CSTOPB=0
+        VMIN=0, VTIME=1 (100 ms timeout)
+        tcsetattr(TCSANOW)
+        tcflush(TCIOFLUSH)
+    end note
+
+else I2C / DDC transport
+    PORT -> KERN  : ::open("/dev/i2c-1", O_RDWR)
+    activate KERN
+    KERN --> PORT : fd_ = 4
+    deactivate KERN
+    PORT -> KERN  : ioctl(fd_, I2C_SLAVE, 0x42)
+    KERN --> PORT : 0
+
+else File replay transport
+    PORT -> KERN  : ::open("gnss_capture.bin", O_RDONLY)
+    activate KERN
+    KERN --> PORT : fd_ = 5
+    deactivate KERN
+end
+
+PORT --> WR   : true
+deactivate PORT
+WR --> GNSS   : true
+deactivate WR
+
+' ============================================================
+== Phase 3 : Send UBX Configuration Command (UART / I2C) ==
+' ============================================================
+
+GNSS -> GNSS  : build ubx_cfg_rate as vector<uint8_t>
+note right of GNSS
+    UBX-CFG-RATE (B5 62 06 08 …)
+    switches measurement rate to 10 Hz
+end note
+
+GNSS -> WR    : write_bytes(ubx_cfg_rate)
+activate WR
+WR -> PORT    : write_bytes(ubx_cfg_rate)
+activate PORT
+
+alt UART
+    PORT -> KERN  : ::write(fd_, buf, N)
+    KERN --> PORT : N bytes written
+
+else I2C / DDC
+    PORT -> KERN  : I2C_RDWR: write [0x00, payload…]
+    note right of KERN
+        Register 0x00 = DDC write stream
+        Entire payload in one bus transaction
+    end note
+    KERN --> PORT : 0 (success)
+end
+
+PORT --> WR   : N
+deactivate PORT
+WR --> GNSS   : N
+deactivate WR
+
+GNSS -> WR    : drain()
+activate WR
+WR -> PORT    : drain()
+activate PORT
+
+alt UART
+    PORT -> KERN  : ::tcdrain(fd_)
+    note right of KERN
+        Blocks until all bytes leave
+        the UART TX FIFO
+    end note
+    KERN --> PORT : 0
+
+else I2C
+    PORT --> WR   : true  (I2C transactions are synchronous)
+end
+
+PORT --> WR   : true
+deactivate PORT
+WR --> GNSS   : true
+deactivate WR
+
+' ============================================================
+== Phase 4 : UBX Frame Read Loop ==
+' ============================================================
+
+loop while running (reader thread)
+
+    GNSS -> WR    : available()
+    activate WR
+    WR -> PORT    : available()
+    activate PORT
+
+    alt UART
+        PORT -> KERN  : ioctl(fd_, FIONREAD, &bytes)
+        KERN --> PORT : N bytes
+    else I2C / DDC
+        PORT -> KERN  : I2C_RDWR: write[0xFD], read[2]
+        note right of KERN
+            Registers 0xFD/0xFE hold
+            16-bit big-endian byte count
+        end note
+        KERN --> PORT : [MSB, LSB] → N
+    else File replay
+        PORT -> KERN  : fstat + lseek(SEEK_CUR)
+        KERN --> PORT : bytes remaining to EOF = N
+    end
+
+    PORT --> WR   : N
+    deactivate PORT
+    WR --> GNSS   : N
+    deactivate WR
+
+    alt N > 0
+
+        GNSS -> WR    : read_bytes(frame_buf, N)
+        activate WR
+        WR -> PORT    : read_bytes(frame_buf, N)
+        activate PORT
+
+        alt UART
+            PORT -> KERN  : ::read(fd_, buf, N)
+            KERN --> PORT : n bytes read
+
+        else I2C / DDC
+            PORT -> KERN  : I2C_RDWR: write[0xFF], read[N]
+            note right of KERN
+                Register 0xFF = DDC data stream
+                Combined write+read in one transaction
+            end note
+            KERN --> PORT : n bytes read
+
+        else File replay
+            PORT -> KERN  : ::read(fd_, buf, N)
+            KERN --> PORT : n bytes read
+            opt loop enabled and EOF
+                PORT -> KERN  : lseek(fd_, 0, SEEK_SET)
+                note right : Wrap to file start
+            end
+        end
+
+        PORT -> PORT  : buf.resize(n)
+        PORT --> WR   : n
+        deactivate PORT
+        WR --> GNSS   : n
+        deactivate WR
+
+        GNSS -> GNSS  : parse_ubx_frame(frame_buf)
+        note right of GNSS
+            Validate sync chars B5 62
+            Verify checksum
+            Dispatch to position / velocity /
+            time parsers
+        end note
+
+    else N == 0
+        GNSS -> GNSS : sleep 10 ms
+    end
+
+end
+
+' ============================================================
+== Phase 5 : Reconfigure (e.g. UART baud-rate switch) ==
+' ============================================================
+
+GNSS -> WR    : reconfigure(uart_config::gnss_high_speed("/dev/ttyS0"))
+activate WR
+WR -> PORT    : reconfigure(new_config)
+activate PORT
+PORT -> PORT  : lock mutex_
+PORT -> KERN  : ::tcflush(fd_, TCIOFLUSH)
+PORT -> KERN  : ::close(fd_)
+KERN --> PORT : 0
+PORT -> PORT  : fd_ = -1
+PORT -> KERN  : ::open("/dev/ttyS0", O_RDWR|O_NOCTTY)
+KERN --> PORT : fd_ = 3
+PORT -> PORT  : apply_termios_config()\n(cfsetispeed B115200)
+PORT -> PORT  : unlock mutex_
+PORT --> WR   : true
+deactivate PORT
+WR --> GNSS   : true
+deactivate WR
+
+' ============================================================
+== Phase 6 : Shutdown ==
+' ============================================================
+
+GNSS -> WR    : shutdown()
+activate WR
+WR -> PORT    : close()
+activate PORT
+PORT -> PORT  : lock mutex_
+PORT -> KERN  : flush / fsync
+PORT -> KERN  : ::close(fd_)
+KERN --> PORT : 0
+PORT -> PORT  : fd_ = -1
+PORT -> PORT  : unlock mutex_
+PORT --> WR   : (done)
+deactivate PORT
+deactivate WR
+
+GNSS -> GNSS  : (I/O session ended)
+
+@enduml
